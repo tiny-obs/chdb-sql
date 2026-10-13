@@ -4,18 +4,12 @@ import (
 	"bytes"
 	"context"
 	"database/sql/driver"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"reflect"
 
 	chdbpurego "github.com/chdb-io/chdb-go/chdb-purego"
 )
-
-// resultFormat has a names line and a types line before the rows, so Rows can report column names and
-// decode values by ClickHouse type without a schema. It does not depend on Parquet or Arrow.
-const resultFormat = "JSONCompactEachRowWithNamesAndTypes"
 
 // query starts a streaming read and returns once the two header lines are in, so Columns works at once.
 func (cn *conn) query(ctx context.Context, q string) (driver.Rows, error) {
@@ -47,8 +41,7 @@ type rows struct {
 	failed bool
 	// finished is set when libchdb reported the natural end of the stream, so there is nothing left to cancel.
 	finished bool
-	names    []string
-	types    []colType
+	cols     columns
 }
 
 // fill appends the next chunk to buf. libchdb starts every chunk with its own names and types lines and ends
@@ -121,35 +114,25 @@ func (r *rows) line() ([]byte, error) {
 }
 
 func (r *rows) readHeader() error {
-	l, err := r.line()
+	names, err := r.line()
 	if err == io.EOF {
 		return nil // a statement without a result set
 	}
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(l, &r.names); err != nil {
-		return fmt.Errorf("chdbsql: bad result header: %w", err)
-	}
-	l, err = r.line()
+	types, err := r.line()
 	if err != nil {
 		if err == io.EOF {
-			err = errors.New("chdbsql: result has no type header")
+			err = errNoTypeHeader
 		}
 		return err
 	}
-	var ts []string
-	if err := json.Unmarshal(l, &ts); err != nil || len(ts) != len(r.names) {
-		return fmt.Errorf("chdbsql: bad result type header: %q", l)
-	}
-	r.types = make([]colType, len(ts))
-	for i, t := range ts {
-		r.types[i] = parseType(t)
-	}
-	return nil
+	r.cols, err = parseHeader(names, types)
+	return err
 }
 
-func (r *rows) Columns() []string { return r.names }
+func (r *rows) Columns() []string { return r.cols.names }
 
 // Close frees the stream only after libchdb reported its natural end. chdb-go v1.12.0 Free passes the connection
 // cell where libchdb expects the connection (streaming.go: chdbStreamCancelQuery(c.curConn, ...) while every fetch
@@ -185,25 +168,11 @@ func (r *rows) Next(dest []driver.Value) error {
 	if err != nil {
 		return err
 	}
-	var cells []json.RawMessage
-	if err := json.Unmarshal(l, &cells); err != nil {
-		return fmt.Errorf("chdbsql: bad result row: %w", err)
-	}
-	if len(cells) != len(dest) {
-		return fmt.Errorf("chdbsql: row has %d values, header has %d columns", len(cells), len(dest))
-	}
-	for i, c := range cells {
-		v, err := r.types[i].decode(c)
-		if err != nil {
-			return fmt.Errorf("chdbsql: column %q (%s): %w", r.names[i], r.types[i].full, err)
-		}
-		dest[i] = v
-	}
-	return nil
+	return r.cols.decodeRow(l, dest)
 }
 
-func (r *rows) ColumnTypeDatabaseTypeName(i int) string { return r.types[i].full }
+func (r *rows) ColumnTypeDatabaseTypeName(i int) string { return r.cols.typeName(i) }
 
-func (r *rows) ColumnTypeNullable(i int) (nullable, ok bool) { return r.types[i].nullable, true }
+func (r *rows) ColumnTypeNullable(i int) (nullable, ok bool) { return r.cols.types[i].nullable, true }
 
-func (r *rows) ColumnTypeScanType(i int) reflect.Type { return r.types[i].scanType() }
+func (r *rows) ColumnTypeScanType(i int) reflect.Type { return r.cols.types[i].scanType() }

@@ -10,7 +10,8 @@ Parquet and sends every query through one process-wide session. This driver read
 `JSONCompactEachRowWithNamesAndTypes`, so `libchdb.so` needs no Parquet or Arrow. It should also work with a full
 `libchdb.so`, but that has not been tested.
 
-Module: `github.com/tiny-obs/chdb-sql`, package `chdbsql`, driver name `"chdbsql"`.
+Module: `github.com/tiny-obs/chdb-sql`, package `chdbsql`, driver names `"chdbsql"` (embedded chDB) and `"chdbsql-http"` (a
+ClickHouse server over HTTP, see [HTTP driver](#http-driver)).
 
 ## Use
 
@@ -83,12 +84,39 @@ statement on that connection would read the old query's header. The connection i
 discarded, like an abandoned call. A result read to its last row keeps the connection, also when the reader stops there
 without asking for the next row (`QueryRow`).
 
+## HTTP driver
+
+The same package also drives a ClickHouse server over its HTTP interface, so code written against the embedded driver
+can run against an external server by changing the connector. Driver name `"chdbsql-http"`.
+
+```go
+db := sql.OpenDB(must(chdbsql.NewHTTPConnector("http://user:pass@ch.example:8123/logs?readonly=1&max_execution_time=10")))
+db.SetMaxOpenConns(8)
+```
+
+- DSN: `http://` or `https://`, user and password in the URL, the path is the default database. Every query parameter is a
+  ClickHouse setting sent with every request. Unlike an embedded read-only connection, a `readonly=1` connection can
+  carry `max_execution_time`, so one `*sql.DB` per role is enough.
+- Every statement is one stateless `POST`; the SQL text is the request body. `INSERT ... FORMAT JSONEachRow` followed by
+  the rows goes out verbatim, as the HTTP interface expects.
+- Results are read as `JSONCompactEachRowWithNamesAndTypes` and decoded by the same code as the embedded driver: the
+  same Go value for every column type, arrays, maps and tuples as JSON text, `UInt64` and `Int128+` with every digit.
+  `?` arguments are rendered into the text as literals, with the same rules.
+- Errors are `*chdbsql.ServerError` (`Status`, `Code`, `Message`). ClickHouse answers `200` and writes an error into the
+  body when a query fails after its output started; the driver finds that block (tag from `X-ClickHouse-Exception-Tag`)
+  and returns it from `Rows.Next` and `Rows.Err`, so a failed search is never a short, valid-looking result.
+- A result read to its last row, also by `QueryRow`, returns the HTTP connection to the pool. A result closed earlier
+  aborts the request, which makes the server stop the query. A cancelled context does the same.
+- Compression is off on purpose: a response that is compressed is buffered, so an error in the middle of a large
+  result would come as status 500 with the rows as its body and nothing would stream.
+
 ## Limitations
 
 - No transactions (`Begin` returns an error).
 - No `LastInsertId` and no `RowsAffected`: chDB does not return an affected-row count for `INSERT`.
 - No named arguments. No server-side prepared statements (`Prepare` only keeps the query text).
-- One embedded server and one data path per process.
+- One embedded server and one data path per process (embedded driver).
+- The HTTP driver sends no compression (`Accept-Encoding: identity`) and has no TLS options beyond the system roots.
 
 ## Test
 
@@ -100,3 +128,14 @@ The tests create a temporary data directory and cover argument binding, a round 
 and 300 000-row results, errors, read-only rejection of writes, parallel writer and readers, context cancellation, and
 rejection of named arguments and transactions. They need a working `libchdb.so`. Last run: all pass against the lite
 library from chdb-core (`lite-shared`).
+
+The HTTP driver tests need a ClickHouse server and are skipped without `CHDBSQL_HTTP_DSN`:
+
+```
+nerdctl run -d --name ch -p 18123:8123 -e CLICKHOUSE_USER=test -e CLICKHOUSE_PASSWORD=test clickhouse/clickhouse-server
+CHDBSQL_HTTP_DSN=http://test:test@localhost:18123/default CHDB_LIB_PATH=/path/to/libchdb.so go test ./...
+```
+
+They cover the same round trip of every column type, an error in the middle of a result, error statuses, a read-only
+connection that keeps its settings, TCP connection reuse, a 300 000-row result, abandoning a result, cancellation and
+parallel readers. Last run: all pass against ClickHouse 26.9 with `-race`.

@@ -202,9 +202,15 @@ func (result) RowsAffected() (int64, error) {
 	return 0, errors.New("chdbsql: RowsAffected is not available")
 }
 
+// stmt keeps a query text for Prepare; the embedded and the HTTP connection both run it.
 type stmt struct {
-	cn    *conn
+	cn    stmtConn
 	query string
+}
+
+type stmtConn interface {
+	ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error)
+	QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error)
 }
 
 func (s *stmt) Close() error  { return nil }

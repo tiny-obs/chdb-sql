@@ -1,4 +1,4 @@
-package chdbsql
+package chhttp
 
 import (
 	"bufio"
@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tiny-obs/chdb-sql/internal/wire"
 )
 
 // HTTPDriverName is the name registered with database/sql for the HTTP driver.
@@ -121,7 +123,7 @@ func (c *HTTPConnector) post(ctx context.Context, query string, withFormat bool)
 		q[k] = v
 	}
 	if withFormat {
-		q.Set("default_format", resultFormat)
+		q.Set("default_format", wire.Format)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint+"?"+q.Encode(), strings.NewReader(query))
 	if err != nil {
@@ -220,15 +222,15 @@ func findException(body []byte, tag string) *ServerError {
 type httpConn struct{ c *HTTPConnector }
 
 func (cn *httpConn) Prepare(query string) (driver.Stmt, error) {
-	return &stmt{cn: cn, query: query}, nil
+	return &wire.Stmt{Conn: cn, Text: query}, nil
 }
 
 func (cn *httpConn) Close() error { return nil }
 
-func (cn *httpConn) Begin() (driver.Tx, error) { return nil, errNoTx }
+func (cn *httpConn) Begin() (driver.Tx, error) { return nil, wire.ErrNoTx }
 
 func (cn *httpConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
-	return nil, errNoTx
+	return nil, wire.ErrNoTx
 }
 
 func (cn *httpConn) Ping(ctx context.Context) error {
@@ -236,11 +238,11 @@ func (cn *httpConn) Ping(ctx context.Context) error {
 	return err
 }
 
-func (cn *httpConn) CheckNamedValue(nv *driver.NamedValue) error { return checkNamedValue(nv) }
+func (cn *httpConn) CheckNamedValue(nv *driver.NamedValue) error { return wire.CheckNamedValue(nv) }
 
 // ExecContext runs a statement and discards its output. An error ClickHouse writes into the output is returned.
 func (cn *httpConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	q, err := bind(query, args)
+	q, err := wire.Bind(query, args)
 	if err != nil {
 		return nil, err
 	}
@@ -256,12 +258,12 @@ func (cn *httpConn) ExecContext(ctx context.Context, query string, args []driver
 	if se := findException(body, resp.Header.Get(exceptionTagHeader)); se != nil {
 		return nil, se
 	}
-	return result{}, nil
+	return wire.Result{}, nil
 }
 
 // QueryContext starts a streaming read and returns once the two header lines are in, so Columns works at once.
 func (cn *httpConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	q, err := bind(query, args)
+	q, err := wire.Bind(query, args)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +287,7 @@ type httpRows struct {
 	br     *bufio.Reader
 	cancel context.CancelFunc
 	tag    string
-	cols   columns
+	cols   wire.Columns
 	eof    bool
 }
 
@@ -331,15 +333,15 @@ func (r *httpRows) readHeader() error {
 	types, err := r.line()
 	if err != nil {
 		if err == io.EOF {
-			err = errNoTypeHeader
+			err = wire.ErrNoTypes
 		}
 		return err
 	}
-	r.cols, err = parseHeader(names, types)
+	r.cols, err = wire.ParseHeader(names, types)
 	return err
 }
 
-func (r *httpRows) Columns() []string { return r.cols.names }
+func (r *httpRows) Columns() []string { return r.cols.Names }
 
 func (r *httpRows) Next(dest []driver.Value) error {
 	if r.body == nil {
@@ -349,7 +351,7 @@ func (r *httpRows) Next(dest []driver.Value) error {
 	if err != nil {
 		return err
 	}
-	return r.cols.decodeRow(l, dest)
+	return r.cols.DecodeRow(l, dest)
 }
 
 // Close lets the HTTP connection go back to the pool when the result was read to its end, and aborts the request
@@ -372,10 +374,10 @@ func (r *httpRows) Close() error {
 	return nil
 }
 
-func (r *httpRows) ColumnTypeDatabaseTypeName(i int) string { return r.cols.typeName(i) }
+func (r *httpRows) ColumnTypeDatabaseTypeName(i int) string { return r.cols.TypeName(i) }
 
 func (r *httpRows) ColumnTypeNullable(i int) (nullable, ok bool) {
-	return r.cols.types[i].nullable, true
+	return r.cols.Nullable(i), true
 }
 
-func (r *httpRows) ColumnTypeScanType(i int) reflect.Type { return r.cols.types[i].scanType() }
+func (r *httpRows) ColumnTypeScanType(i int) reflect.Type { return r.cols.ScanType(i) }

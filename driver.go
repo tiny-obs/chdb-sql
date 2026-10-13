@@ -25,10 +25,11 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
-	"errors"
 	"sync/atomic"
 
 	chdbpurego "github.com/chdb-io/chdb-go/chdb-purego"
+
+	"github.com/tiny-obs/chdb-sql/internal/wire"
 )
 
 // DriverName is the name registered with database/sql.
@@ -68,8 +69,6 @@ func (c *Connector) Connect(ctx context.Context) (driver.Conn, error) {
 // Driver implements driver.Connector.
 func (c *Connector) Driver() driver.Driver { return Driver{} }
 
-var errNoTx = errors.New("chdbsql: transactions are not supported")
-
 // conn is one chDB connection. database/sql never uses a conn from two goroutines at once.
 type conn struct {
 	c chdbpurego.ChdbConn
@@ -88,15 +87,17 @@ var (
 	_ driver.Pinger                         = (*conn)(nil)
 	_ driver.Validator                      = (*conn)(nil)
 	_ driver.NamedValueChecker              = (*conn)(nil)
-	_ driver.StmtExecContext                = (*stmt)(nil)
-	_ driver.StmtQueryContext               = (*stmt)(nil)
-	_ driver.NamedValueChecker              = (*stmt)(nil)
+	_ driver.StmtExecContext                = (*wire.Stmt)(nil)
+	_ driver.StmtQueryContext               = (*wire.Stmt)(nil)
+	_ driver.NamedValueChecker              = (*wire.Stmt)(nil)
 	_ driver.RowsColumnTypeScanType         = (*rows)(nil)
 	_ driver.RowsColumnTypeDatabaseTypeName = (*rows)(nil)
 	_ driver.RowsColumnTypeNullable         = (*rows)(nil)
 )
 
-func (cn *conn) Prepare(query string) (driver.Stmt, error) { return &stmt{cn: cn, query: query}, nil }
+func (cn *conn) Prepare(query string) (driver.Stmt, error) {
+	return &wire.Stmt{Conn: cn, Text: query}, nil
+}
 
 // Close waits for abandoned calls, then closes the chDB connection.
 func (cn *conn) Close() error {
@@ -111,9 +112,11 @@ func (cn *conn) Close() error {
 	return nil
 }
 
-func (cn *conn) Begin() (driver.Tx, error) { return nil, errNoTx }
+func (cn *conn) Begin() (driver.Tx, error) { return nil, wire.ErrNoTx }
 
-func (cn *conn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) { return nil, errNoTx }
+func (cn *conn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	return nil, wire.ErrNoTx
+}
 
 // IsValid implements driver.Validator.
 func (cn *conn) IsValid() bool { return !cn.broken.Load() && cn.c.Ready() }
@@ -123,10 +126,10 @@ func (cn *conn) Ping(ctx context.Context) error {
 	return err
 }
 
-func (cn *conn) CheckNamedValue(nv *driver.NamedValue) error { return checkNamedValue(nv) }
+func (cn *conn) CheckNamedValue(nv *driver.NamedValue) error { return wire.CheckNamedValue(nv) }
 
 func (cn *conn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	q, err := bind(query, args)
+	q, err := wire.Bind(query, args)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +137,7 @@ func (cn *conn) ExecContext(ctx context.Context, query string, args []driver.Nam
 }
 
 func (cn *conn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	q, err := bind(query, args)
+	q, err := wire.Bind(query, args)
 	if err != nil {
 		return nil, err
 	}
@@ -188,48 +191,5 @@ func (cn *conn) exec(ctx context.Context, q string) (driver.Result, error) {
 	if o.err != nil {
 		return nil, o.err
 	}
-	return result{}, nil
-}
-
-// result reports nothing: chDB does not return an affected-row count for INSERT.
-type result struct{}
-
-func (result) LastInsertId() (int64, error) {
-	return 0, errors.New("chdbsql: LastInsertId is not supported")
-}
-
-func (result) RowsAffected() (int64, error) {
-	return 0, errors.New("chdbsql: RowsAffected is not available")
-}
-
-// stmt keeps a query text for Prepare; the embedded and the HTTP connection both run it.
-type stmt struct {
-	cn    stmtConn
-	query string
-}
-
-type stmtConn interface {
-	ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error)
-	QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error)
-}
-
-func (s *stmt) Close() error  { return nil }
-func (s *stmt) NumInput() int { return -1 }
-
-func (s *stmt) Exec([]driver.Value) (driver.Result, error) {
-	return nil, errors.New("chdbsql: use ExecContext")
-}
-
-func (s *stmt) Query([]driver.Value) (driver.Rows, error) {
-	return nil, errors.New("chdbsql: use QueryContext")
-}
-
-func (s *stmt) CheckNamedValue(nv *driver.NamedValue) error { return checkNamedValue(nv) }
-
-func (s *stmt) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
-	return s.cn.ExecContext(ctx, s.query, args)
-}
-
-func (s *stmt) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
-	return s.cn.QueryContext(ctx, s.query, args)
+	return wire.Result{}, nil
 }

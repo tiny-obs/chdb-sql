@@ -1,4 +1,6 @@
-package chdbsql
+// Package wire is what the embedded and the HTTP driver share: client-side rendering of "?" arguments and decoding
+// of the JSONCompactEachRowWithNamesAndTypes result format. It imports nothing that needs libchdb.so.
+package wire
 
 import (
 	"database/sql/driver"
@@ -16,10 +18,10 @@ import (
 // value quoted by the rules below. With no arguments the query is sent untouched, so "a ? b : c" and data
 // after "INSERT ... FORMAT JSONEachRow" containing "?" are safe.
 
-// checkNamedValue accepts everything literal can render and rejects named arguments.
-func checkNamedValue(nv *driver.NamedValue) error {
+// CheckNamedValue accepts everything literal can render and rejects named arguments.
+func CheckNamedValue(nv *driver.NamedValue) error {
 	if nv.Name != "" {
-		return errors.New("chdbsql: named arguments are not supported, use positional ?")
+		return errors.New("chdb-sql: named arguments are not supported, use positional ?")
 	}
 	switch v := nv.Value.(type) {
 	case nil, int64, uint64, float64, bool, string, []byte, time.Time:
@@ -30,7 +32,7 @@ func checkNamedValue(nv *driver.NamedValue) error {
 			// Rendered as an array literal; every element must itself be renderable.
 			for i := range rv.Len() {
 				e := driver.NamedValue{Value: rv.Index(i).Interface()}
-				if err := checkNamedValue(&e); err != nil {
+				if err := CheckNamedValue(&e); err != nil {
 					return err
 				}
 			}
@@ -45,8 +47,8 @@ func checkNamedValue(nv *driver.NamedValue) error {
 	}
 }
 
-// bind replaces each "?" outside quotes and comments with the literal of the matching argument.
-func bind(query string, args []driver.NamedValue) (string, error) {
+// Bind replaces each "?" outside quotes and comments with the literal of the matching argument.
+func Bind(query string, args []driver.NamedValue) (string, error) {
 	if len(args) == 0 {
 		return query, nil
 	}
@@ -78,11 +80,11 @@ func bind(query string, args []driver.NamedValue) (string, error) {
 			i += 2 + j
 		case c == '?':
 			if n >= len(args) {
-				return "", fmt.Errorf("chdbsql: query has more ? placeholders than the %d arguments", len(args))
+				return "", fmt.Errorf("chdb-sql: query has more ? placeholders than the %d arguments", len(args))
 			}
 			lit, err := literal(args[n].Value)
 			if err != nil {
-				return "", fmt.Errorf("chdbsql: argument %d: %w", n+1, err)
+				return "", fmt.Errorf("chdb-sql: argument %d: %w", n+1, err)
 			}
 			b.WriteString(lit)
 			n++
@@ -93,7 +95,7 @@ func bind(query string, args []driver.NamedValue) (string, error) {
 		}
 	}
 	if n != len(args) {
-		return "", fmt.Errorf("chdbsql: query has %d ? placeholders but %d arguments", n, len(args))
+		return "", fmt.Errorf("chdb-sql: query has %d ? placeholders but %d arguments", n, len(args))
 	}
 	return b.String(), nil
 }
@@ -161,7 +163,7 @@ func literal(v any) (string, error) {
 		for i := range parts {
 			e := rv.Index(i).Interface()
 			nv := driver.NamedValue{Value: e}
-			if err := checkNamedValue(&nv); err != nil {
+			if err := CheckNamedValue(&nv); err != nil {
 				return "", err
 			}
 			s, err := literal(nv.Value)

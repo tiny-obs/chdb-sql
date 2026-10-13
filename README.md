@@ -10,8 +10,9 @@ Parquet and sends every query through one process-wide session. This driver read
 `JSONCompactEachRowWithNamesAndTypes`, so `libchdb.so` needs no Parquet or Arrow. It should also work with a full
 `libchdb.so`, but that has not been tested.
 
-Module: `github.com/tiny-obs/chdb-sql`, package `chdbsql`, driver names `"chdbsql"` (embedded chDB) and `"chdbsql-http"` (a
-ClickHouse server over HTTP, see [HTTP driver](#http-driver)).
+Module: `github.com/tiny-obs/chdb-sql`. Package `chdbsql` is the embedded chDB driver, name `"chdbsql"`. Package `chhttp`
+drives a ClickHouse server over HTTP, name `"chdbsql-http"`, see [HTTP driver](#http-driver). Both share
+`internal/wire` (argument rendering and result decoding).
 
 ## Use
 
@@ -86,11 +87,12 @@ without asking for the next row (`QueryRow`).
 
 ## HTTP driver
 
-The same package also drives a ClickHouse server over its HTTP interface, so code written against the embedded driver
-can run against an external server by changing the connector. Driver name `"chdbsql-http"`.
+Package `github.com/tiny-obs/chdb-sql/chhttp` drives a ClickHouse server over its HTTP interface, so code written
+against the embedded driver can run against an external server by changing the connector. Driver name `"chdbsql-http"`.
+It does not import `chdb-go` and needs no `libchdb.so`; importing it registers only the HTTP driver.
 
 ```go
-db := sql.OpenDB(must(chdbsql.NewHTTPConnector("http://user:pass@ch.example:8123/logs?readonly=1&max_execution_time=10")))
+db := sql.OpenDB(must(chhttp.NewHTTPConnector("http://user:pass@ch.example:8123/logs?readonly=1&max_execution_time=10")))
 db.SetMaxOpenConns(8)
 ```
 

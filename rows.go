@@ -9,6 +9,8 @@ import (
 	"reflect"
 
 	chdbpurego "github.com/chdb-io/chdb-go/chdb-purego"
+
+	"github.com/tiny-obs/chdb-sql/internal/wire"
 )
 
 // query starts a streaming read and returns once the two header lines are in, so Columns works at once.
@@ -19,7 +21,7 @@ func (cn *conn) query(ctx context.Context, q string) (driver.Rows, error) {
 	if cn.broken.Load() {
 		return nil, driver.ErrBadConn
 	}
-	sr, err := cn.c.QueryStreaming(q, resultFormat)
+	sr, err := cn.c.QueryStreaming(q, wire.Format)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +43,7 @@ type rows struct {
 	failed bool
 	// finished is set when libchdb reported the natural end of the stream, so there is nothing left to cancel.
 	finished bool
-	cols     columns
+	cols     wire.Columns
 }
 
 // fill appends the next chunk to buf. libchdb starts every chunk with its own names and types lines and ends
@@ -124,15 +126,15 @@ func (r *rows) readHeader() error {
 	types, err := r.line()
 	if err != nil {
 		if err == io.EOF {
-			err = errNoTypeHeader
+			err = wire.ErrNoTypes
 		}
 		return err
 	}
-	r.cols, err = parseHeader(names, types)
+	r.cols, err = wire.ParseHeader(names, types)
 	return err
 }
 
-func (r *rows) Columns() []string { return r.cols.names }
+func (r *rows) Columns() []string { return r.cols.Names }
 
 // Close frees the stream only after libchdb reported its natural end. chdb-go v1.12.0 Free passes the connection
 // cell where libchdb expects the connection (streaming.go: chdbStreamCancelQuery(c.curConn, ...) while every fetch
@@ -168,11 +170,11 @@ func (r *rows) Next(dest []driver.Value) error {
 	if err != nil {
 		return err
 	}
-	return r.cols.decodeRow(l, dest)
+	return r.cols.DecodeRow(l, dest)
 }
 
-func (r *rows) ColumnTypeDatabaseTypeName(i int) string { return r.cols.typeName(i) }
+func (r *rows) ColumnTypeDatabaseTypeName(i int) string { return r.cols.TypeName(i) }
 
-func (r *rows) ColumnTypeNullable(i int) (nullable, ok bool) { return r.cols.types[i].nullable, true }
+func (r *rows) ColumnTypeNullable(i int) (nullable, ok bool) { return r.cols.Nullable(i), true }
 
-func (r *rows) ColumnTypeScanType(i int) reflect.Type { return r.cols.types[i].scanType() }
+func (r *rows) ColumnTypeScanType(i int) reflect.Type { return r.cols.ScanType(i) }

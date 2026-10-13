@@ -1,4 +1,4 @@
-package chdbsql
+package chhttp
 
 import (
 	"context"

@@ -1,4 +1,4 @@
-package chdbsql
+package wire
 
 import (
 	"bytes"
@@ -11,8 +11,8 @@ import (
 	"time"
 )
 
-// colType is a parsed ClickHouse column type.
-type colType struct {
+// ColType is a parsed ClickHouse column type.
+type ColType struct {
 	full     string // as reported by the server, e.g. Nullable(DateTime64(6, 'UTC'))
 	base     string // type name without wrappers and arguments, e.g. DateTime64
 	args     string // text between the outer parentheses of base
@@ -22,9 +22,9 @@ type colType struct {
 
 var locCache sync.Map // name -> *time.Location
 
-// parseType strips LowCardinality and Nullable and splits the base name from its arguments.
-func parseType(full string) colType {
-	t := colType{full: full}
+// ParseType strips LowCardinality and Nullable and splits the base name from its arguments.
+func ParseType(full string) ColType {
+	t := ColType{full: full}
 	s := strings.TrimSpace(full)
 	for {
 		switch {
@@ -71,7 +71,7 @@ var (
 	typeAny     = reflect.TypeOf((*any)(nil)).Elem()
 )
 
-func (t colType) scanType() reflect.Type {
+func (t ColType) scanType() reflect.Type {
 	if t.nullable {
 		return typeAny
 	}
@@ -97,7 +97,7 @@ func (t colType) scanType() reflect.Type {
 //	Date, DateTime*             time.Time      Nullable(T)       nil for NULL
 //	everything else             string: text for String, Enum, UUID, IP, Int128/256, UInt128/256 and Decimal;
 //	                            the JSON text for Array, Tuple, Map, JSON, Variant and Dynamic
-func (t colType) decode(raw json.RawMessage) (any, error) {
+func (t ColType) Decode(raw json.RawMessage) (any, error) {
 	raw = bytes.TrimSpace(raw)
 	isNull := string(raw) == "null"
 	if isNull && t.nullable {

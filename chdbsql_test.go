@@ -272,6 +272,37 @@ func TestUnfinishedStreamDiscardsTheConnection(t *testing.T) {
 	}
 }
 
+// QueryRow stops after the first row without reading the end of the stream. That is a finished result, not an abandoned
+// one, so the connection stays in the pool; a stream with more rows left than were read does not.
+func TestFullyReadResultKeepsTheConnection(t *testing.T) {
+	openWriter(t)
+	r := openReaders(t, 1)
+	ctx := context.Background()
+	c, err := r.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	valid := func() bool {
+		ok := false
+		_ = c.Raw(func(dc any) error { ok = dc.(driver.Validator).IsValid(); return nil })
+		return ok
+	}
+	var n int64
+	if err := c.QueryRowContext(ctx, "SELECT 1").Scan(&n); err != nil || n != 1 {
+		t.Fatalf("query row: %v %v", n, err)
+	}
+	if !valid() {
+		t.Fatal("a one-row result that was read completely discarded the connection")
+	}
+	if err := c.QueryRowContext(ctx, "SELECT number FROM numbers(50000000)").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if valid() {
+		t.Fatal("a stream with rows left kept the connection")
+	}
+}
+
 func TestReadOnlyConnectionRejectsWrites(t *testing.T) {
 	w := openWriter(t)
 	if _, err := w.Exec("CREATE TABLE IF NOT EXISTS ro_t (x UInt8) ENGINE = MergeTree ORDER BY x"); err != nil {

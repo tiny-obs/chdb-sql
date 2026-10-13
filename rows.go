@@ -161,6 +161,11 @@ func (r *rows) Columns() []string { return r.names }
 // broken and database/sql discards it. Remove this once chdb-go passes the right handle.
 func (r *rows) Close() error {
 	if r.sr != nil {
+		// A reader that stops right after the last row (QueryRow) has not seen the end of the stream yet. The next chunk is
+		// the end marker when nothing is left, so look at it before judging the stream unfinished.
+		if !r.eof && len(bytes.TrimSpace(r.buf)) == 0 {
+			_ = r.fill() // an error sets failed
+		}
 		if r.finished {
 			r.sr.Free()
 		}

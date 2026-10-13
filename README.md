@@ -80,7 +80,8 @@ to bound statements.
 
 **Streams.** A stream that fails or is closed before its end leaves its query running inside libchdb, and the next
 statement on that connection would read the old query's header. The connection is therefore marked broken and
-discarded, like an abandoned call. A stream read to its end keeps the connection.
+discarded, like an abandoned call. A result read to its last row keeps the connection, also when the reader stops there
+without asking for the next row (`QueryRow`).
 
 ## Limitations
 

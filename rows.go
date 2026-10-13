@@ -29,7 +29,7 @@ func (cn *conn) query(ctx context.Context, q string) (driver.Rows, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := &rows{sr: sr}
+	r := &rows{cn: cn, sr: sr}
 	if err := r.readHeader(); err != nil {
 		r.Close()
 		return nil, err
@@ -38,10 +38,13 @@ func (cn *conn) query(ctx context.Context, q string) (driver.Rows, error) {
 }
 
 type rows struct {
+	cn  *conn
 	sr  chdbpurego.ChdbStreamResult
 	buf []byte // bytes received and not yet parsed
 	hdr []byte // the two header lines of the first chunk, kept to check and strip the copy at the start of every chunk
 	eof bool
+	// failed is set when the stream reported an error or broke its framing.
+	failed bool
 	// finished is set when libchdb reported the natural end of the stream, so there is nothing left to cancel.
 	finished bool
 	names    []string
@@ -58,7 +61,7 @@ func (r *rows) fill() error {
 	chunk := r.sr.GetNext()
 	if chunk != nil {
 		if err := chunk.Error(); err != nil {
-			r.eof = true
+			r.eof, r.failed = true, true
 			return err
 		}
 	}
@@ -66,7 +69,11 @@ func (r *rows) fill() error {
 		r.eof = true
 		// libchdb answers the natural end of a stream with an empty chunk and marks the stream finished.
 		r.finished = chunk != nil
-		return r.sr.Error()
+		if err := r.sr.Error(); err != nil {
+			r.failed = true
+			return err
+		}
+		return nil
 	}
 	// The chunk memory is freed by the next GetNext, so keep a copy.
 	b := chunk.Buf()
@@ -81,7 +88,7 @@ func (r *rows) fill() error {
 	} else if bytes.HasPrefix(b, r.hdr) {
 		b = b[len(r.hdr):]
 	} else {
-		r.eof = true
+		r.eof, r.failed = true, true
 		return errors.New("chdbsql: a result chunk does not start with the result header")
 	}
 	r.buf = append(r.buf, b...)
@@ -148,13 +155,17 @@ func (r *rows) Columns() []string { return r.names }
 // cell where libchdb expects the connection (streaming.go: chdbStreamCancelQuery(c.curConn, ...) while every fetch
 // passes c.curConn.internal_data), so for a stream that is not finished libchdb locks a mutex in the wrong
 // object: a hang or SIGSEGV, seen with both the lite and the full libchdb. A finished stream returns before that
-// object is touched. An unfinished stream (an error, or Close before the last row) is therefore not freed here:
-// the small result handle leaks, and the next query on the connection, or closing it, cancels the query inside
-// libchdb. Remove this once chdb-go passes the right handle.
+// object is touched. An unfinished stream (an error, or Close before the last row) is therefore not freed here: the
+// small result handle leaks, and closing the connection cancels the query inside libchdb. The next query on that
+// connection would read the abandoned stream's leftover header instead of its own, so the connection is marked
+// broken and database/sql discards it. Remove this once chdb-go passes the right handle.
 func (r *rows) Close() error {
 	if r.sr != nil {
 		if r.finished {
 			r.sr.Free()
+		}
+		if !r.eof || r.failed {
+			r.cn.broken.Store(true)
 		}
 		r.sr = nil
 	}

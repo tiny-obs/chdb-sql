@@ -215,6 +215,63 @@ func TestErrorsAreReturnedAndConnectionStaysUsable(t *testing.T) {
 	}
 }
 
+// A stream that fails or is closed before its end leaves the query inside libchdb; the next statement on the same
+// connection used to read that query's header. The connection must be discarded instead.
+func TestUnfinishedStreamDiscardsTheConnection(t *testing.T) {
+	openWriter(t) // opened first: it starts the server
+	r := sql.OpenDB(NewConnector("file:" + dataDir + "?mode=ro&max_memory_usage=128000000"))
+	r.SetMaxOpenConns(1)
+	t.Cleanup(func() { r.Close() })
+	ctx := context.Background()
+	next := func() {
+		t.Helper()
+		c, err := r.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		var a, b, c3, d, e, f int64
+		if err := c.QueryRowContext(ctx, "SELECT 1, 2, 3, 4, 5, 6").Scan(&a, &b, &c3, &d, &e, &f); err != nil || f != 6 {
+			t.Fatalf("next statement: %v %v", f, err)
+		}
+	}
+	for round := range 3 {
+		// A query that fails inside the stream (memory cap).
+		c, err := r.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rs, err := c.QueryContext(ctx, "SELECT length(groupArray(number)) FROM numbers(200000000)")
+		if err == nil {
+			for rs.Next() {
+			}
+			err = rs.Err()
+			rs.Close()
+		}
+		if err == nil || !strings.Contains(err.Error(), "MEMORY_LIMIT_EXCEEDED") {
+			t.Fatalf("round %d: err = %v", round, err)
+		}
+		c.Close()
+		next()
+
+		// A stream closed after a few rows.
+		c, err = r.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rs, err = c.QueryContext(ctx, "SELECT number, toString(number) FROM numbers(50000000)")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range 10 {
+			rs.Next()
+		}
+		rs.Close()
+		c.Close()
+		next()
+	}
+}
+
 func TestReadOnlyConnectionRejectsWrites(t *testing.T) {
 	w := openWriter(t)
 	if _, err := w.Exec("CREATE TABLE IF NOT EXISTS ro_t (x UInt8) ENGINE = MergeTree ORDER BY x"); err != nil {

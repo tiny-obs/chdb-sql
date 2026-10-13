@@ -104,7 +104,7 @@ db.SetMaxOpenConns(8)
 - Results are read as `JSONCompactEachRowWithNamesAndTypes` and decoded by the same code as the embedded driver: the
   same Go value for every column type, arrays, maps and tuples as JSON text, `UInt64` and `Int128+` with every digit.
   `?` arguments are rendered into the text as literals, with the same rules.
-- Errors are `*chdbsql.ServerError` (`Status`, `Code`, `Message`). ClickHouse answers `200` and writes an error into the
+- Errors are `*chhttp.ServerError` (`Status`, `Code`, `Message`). ClickHouse answers `200` and writes an error into the
   body when a query fails after its output started; the driver finds that block (tag from `X-ClickHouse-Exception-Tag`)
   and returns it from `Rows.Next` and `Rows.Err`, so a failed search is never a short, valid-looking result.
 - A result read to its last row, also by `QueryRow`, returns the HTTP connection to the pool. A result closed earlier

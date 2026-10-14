@@ -1,0 +1,20 @@
+# Regenerates the ConnectRPC client code of chdb-server's chdb.v1 service into internal/gen, so that this module does
+# not depend on the chdb-server module:
+#
+#   buf generate ../chdb-server --template buf.gen.yaml
+#
+# Run it after proto/chdb/v1/chdb.proto changes in chdb-server. The two checkouts must be side by side.
+version: v2
+clean: true
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/tiny-obs/chdb-sql/internal/gen
+plugins:
+  - local: protoc-gen-go
+    out: internal/gen
+    opt: paths=source_relative
+  - local: protoc-gen-connect-go
+    out: internal/gen
+    opt: paths=source_relative

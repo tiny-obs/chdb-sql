@@ -11,8 +11,10 @@ Parquet and sends every query through one process-wide session. This driver read
 `libchdb.so`, but that has not been tested.
 
 Module: `github.com/tiny-obs/chdb-sql`. Package `chdbsql` is the embedded chDB driver, name `"chdbsql"`. Package `chhttp`
-drives a ClickHouse server over HTTP, name `"chdbsql-http"`, see [HTTP driver](#http-driver). Both share
-`internal/wire` (argument rendering and result decoding).
+drives a ClickHouse server over HTTP, name `"chdbsql-http"`, see [HTTP driver](#http-driver). Package `chconnect`
+drives a [chdb-server](https://github.com/tiny-obs/chdb-server) over its ConnectRPC service, name
+`"chdbsql-connect"`, see [ConnectRPC driver](#connectrpc-driver). All three share `internal/wire` (argument rendering
+and result decoding).
 
 ## Use
 
@@ -112,6 +114,66 @@ db.SetMaxOpenConns(8)
 - Compression is off on purpose: a response that is compressed is buffered, so an error in the middle of a large
   result would come as status 500 with the rows as its body and nothing would stream.
 
+## ConnectRPC driver
+
+Package `github.com/tiny-obs/chdb-sql/chconnect` talks to chdb-server's `chdb.v1.Chdb` service (`Query`, `Exec`,
+`Insert`). Driver name `"chdbsql-connect"` (`chconnect.DriverName`). It does not import `chdb-go` and needs no
+`libchdb.so`; importing it registers only this driver. It decodes results exactly like the other two drivers.
+
+```go
+c, err := chconnect.NewConnector("http://:secret-key@chdb.example:8123/logs?max_execution_time=10")
+db := sql.OpenDB(c)
+db.SetMaxOpenConns(8)
+
+// A batch of rows in a text format goes to the server's batching write path:
+n, err := c.Insert(ctx, chconnect.InsertOptions{Table: "events", Columns: []string{"ts", "msg"}, Format: "JSONEachRow"}, rows)
+```
+
+**DSN.** `http://[user:key@]host:8123/database?setting=value`, or `https://`. The path is the default database, sent in
+the `database` field of every request (`?database=name` works too when the path is empty). Every other query parameter is
+a ClickHouse setting, sent in the `settings` map of every request. The password is the server's auth key
+(`CHDB_AUTH_KEY`): when the DSN has one, every request carries `Authorization: Bearer <key>`; without a password no header
+is sent. The user name is accepted and ignored. A wrong or missing key gives connect code `Unauthenticated`.
+
+**When to use it instead of `chdbsql-http`.**
+
+- Inserts. `ExecContext` with `INSERT INTO [db.]table [(columns)] FORMAT <format>` followed by a newline (or blanks) and
+  the data, without `?` arguments, is sent through the `Insert` RPC. The server merges such inserts from many callers
+  into one MergeTree part and returns after the rows are written. Table and column names are parsed client-side (bare, or
+  quoted with backticks or double quotes, with an optional `db.` prefix). Any other shape (`INSERT ... VALUES`,
+  `INSERT ... SELECT`, `FORMAT` without data, a `SETTINGS` clause, a statement with arguments) runs through `Exec`
+  unchanged.
+- The streaming batch API, `func (c *Connector) Insert(ctx, InsertOptions{Table, Columns, Format, Database, Settings},
+  data io.Reader) (written uint64, err error)`. It reads `data` in 1 MiB chunks, sends the header first and returns the
+  number of data bytes the server wrote. `Format` defaults to `JSONEachRow` on the server; `Database` and `Settings`
+  default to the DSN's (a key in `Settings` overrides the DSN's). Table and column names are plain, not quoted. The server
+  takes the whole call before it writes anything (a small one in memory, a large one in a file on disk), so a failed or
+  aborted call (also a `data` reader that returns an error) writes nothing.
+- Typed errors. Every server error is a `*chconnect.ServerError` with `Code` (the ClickHouse exception code from the
+  `X-ClickHouse-Exception-Code` metadata, 0 when there is none), `ConnectCode` and `Message`; it wraps the
+  `*connect.Error`, so `errors.As` finds either. An error that arrives after rows were sent is returned by `Rows.Next` and
+  `Rows.Err`, never as a short result. A cancelled or expired context comes back as the context's error.
+- The tuned HTTP/2 client (below).
+
+**Reads and cancellation.** A query is one `Query` RPC streamed in chunks; a chunk boundary can fall inside a row, and the
+driver reassembles lines across chunks. A result closed before its end cancels the RPC, which makes the server kill the
+query. A result read to its last row, also by `QueryRow`, releases the stream cleanly. A cancelled context does the same
+as an early close.
+
+**Tuned client.** The driver always uses HTTP/2. `http://` means cleartext HTTP/2 with prior knowledge (no upgrade, no
+HTTP/1.1); `https://` means TLS with ALPN `h2` against the system roots. The transport raises Go's HTTP/2 defaults to a
+1 MiB maximum frame size, 8 MiB of receive buffer per stream and 16 MiB per connection. With the defaults (16 KB frames)
+the server's author measured 0.34 to 0.42 s for a 139 MB result over h2c, and 0.08 to 0.19 s with these values; I did not
+repeat that measurement. There is one `http.Client` per connector, no client timeout (the context bounds each call), up to
+64 idle connections per host, and no proxy. Compression is off in both directions: the server does not compress responses,
+and the client neither asks for gzip nor sends it.
+
+**Module.** `chconnect` has no dependency on the chdb-server module. It carries its own copy of the generated client code
+for the `chdb.v1` service in `internal/gen`, generated from chdb-server's `proto/chdb/v1/chdb.proto` with
+`buf generate ../chdb-server --template buf.gen.yaml` (check the two repositories out side by side). Regenerate after the
+proto changes. Importing both this copy and chdb-server's own `gen/chdb/v1` into one binary registers `chdb/v1/chdb.proto`
+twice, which panics at start-up; use only one of them.
+
 ## Limitations
 
 - No transactions (`Begin` returns an error).
@@ -119,6 +181,8 @@ db.SetMaxOpenConns(8)
 - No named arguments. No server-side prepared statements (`Prepare` only keeps the query text).
 - One embedded server and one data path per process (embedded driver).
 - The HTTP driver sends no compression (`Accept-Encoding: identity`) and has no TLS options beyond the system roots.
+- The ConnectRPC driver has no TLS options beyond the system roots, ignores proxy settings, and has no `RowsAffected`
+  after an insert (`Connector.Insert` returns the bytes written, not rows).
 
 ## Test
 
@@ -141,3 +205,20 @@ CHDBSQL_HTTP_DSN=http://test:test@localhost:18123/default CHDB_LIB_PATH=/path/to
 They cover the same round trip of every column type, an error in the middle of a result, error statuses, a read-only
 connection that keeps its settings, TCP connection reuse, a 300 000-row result, abandoning a result, cancellation and
 parallel readers. Last run: all pass against ClickHouse 26.9 with `-race`.
+
+The ConnectRPC driver tests need a chdb-server and are skipped without `CHDBSQL_CONNECT_DSN`; the key is the DSN password
+when the server was started with `CHDB_AUTH_KEY`:
+
+```
+CHDB_LIB_PATH=/usr/local/lib/libchdb.so chdb-server --data-dir /var/lib/chdb --listen 127.0.0.1:8123
+CHDBSQL_CONNECT_DSN=http://:key@localhost:8123/default go test -race ./chconnect
+```
+
+They cover the round trip of every column type, an error in the middle of a result, error codes, a 300 000-row result in
+several chunks, early close (the query disappears from `system.processes`), cancellation, parallel readers, the Insert API
+with concurrent batches, the `INSERT ... FORMAT` routing (checked by counting RPCs), and an aborted insert. Set
+`CHDBSQL_CONNECT_AUTH=1` against a server that has an auth key to also test that a wrong key and a missing key are
+refused. Parsing of the DSN and of `INSERT` statements, and the tests against an in-process fake of the service (line
+reassembly across chunks, error mapping, cancellation, the `Authorization` header, HTTP/2 and no compression, Insert
+chunking and routing), need no server and always run. Last run: all pass with `-race` against an unauthenticated
+chdb-server built from the local tree; the auth test was not run because that server has no auth key support yet.
